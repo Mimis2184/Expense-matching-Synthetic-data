@@ -14,6 +14,64 @@ SEEDS_PATH = (
     PROCESSED_DATA_DIR
     / "generation_seeds.csv"
 )
+# ============================================================
+# Positive pair generation
+# ============================================================
+
+POSITIVE_PAIR_SYSTEM_PROMPT_PATH = (
+    BASE_DIR
+    / "prompts"
+    / "positive_pair_system_prompt.md"
+)
+
+POSITIVE_PAIR_GENERATION_PROMPT_PATH = (
+    BASE_DIR
+    / "prompts"
+    / "positive_pair_generation_prompt.md"
+)
+
+# Approximate total number of proposed positive pairs to generate
+POSITIVE_TARGET_TOTAL = 500
+
+# Maximum number of different real Program Expense anchors
+# used from each expense class.
+POSITIVE_ANCHORS_PER_CLASS = 10
+
+POSITIVE_PAIRS_CSV_PATH = (
+    OUTPUT_DATA_DIR
+    / "positive_pairs_test.csv"
+)
+
+POSITIVE_PAIRS_EXCEL_PATH = (
+    OUTPUT_DATA_DIR
+    / "positive_pairs_test.xlsx"
+)
+
+# ============================================================
+# Positive pair validation
+# ============================================================
+
+POSITIVE_PAIR_VALIDATOR_SYSTEM_PROMPT_PATH = (
+    BASE_DIR
+    / "prompts"
+    / "positive_pair_validator_system_prompt.md"
+)
+
+POSITIVE_PAIR_VALIDATOR_PROMPT_PATH = (
+    BASE_DIR
+    / "prompts"
+    / "positive_pair_validator_prompt.md"
+)
+
+POSITIVE_PAIRS_VALIDATED_CSV_PATH = (
+    OUTPUT_DATA_DIR
+    / "positive_pairs_validated.csv"
+)
+
+POSITIVE_PAIRS_VALIDATION_REPORT_PATH = (
+    OUTPUT_DATA_DIR
+    / "positive_pairs_validation_report.xlsx"
+)
 
 SYSTEM_PROMPT_PATH = BASE_DIR / "prompts" / "system_prompt.md"
 GENERATION_PROMPT_PATH = BASE_DIR / "prompts" / "generation_prompt.md"

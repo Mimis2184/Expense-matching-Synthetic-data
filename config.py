@@ -14,6 +14,36 @@ SEEDS_PATH = (
     PROCESSED_DATA_DIR
     / "generation_seeds.csv"
 )
+
+
+# ============================================================
+# Kmin / Positive rank analysis
+# ============================================================
+
+KMIN_ANALYSIS_EXCEL_PATH = (
+    OUTPUT_DATA_DIR
+    / "kmin_rank_analysis.xlsx"
+)
+
+
+# ============================================================
+# Embedding analysis
+# ============================================================
+
+EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-large"
+
+EMBEDDING_BATCH_SIZE = 16
+
+EMBEDDING_DISTANCE_CSV_PATH = (
+    OUTPUT_DATA_DIR
+    / "embedding_distance_analysis.csv"
+)
+
+EMBEDDING_DISTANCE_EXCEL_PATH = (
+    OUTPUT_DATA_DIR
+    / "embedding_distance_analysis.xlsx"
+)
+
 # ============================================================
 # Positive pair generation
 # ============================================================
@@ -32,6 +62,21 @@ POSITIVE_PAIR_GENERATION_PROMPT_PATH = (
 
 # Approximate total number of proposed positive pairs to generate
 POSITIVE_TARGET_TOTAL = 500
+
+# ============================================================
+# Negative pair generation
+# ============================================================
+
+
+NEGATIVE_PAIRS_CSV_PATH = (
+    OUTPUT_DATA_DIR
+    / "negative_pairs_candidates.csv"
+)
+
+NEGATIVE_PAIRS_EXCEL_PATH = (
+    OUTPUT_DATA_DIR
+    / "negative_pairs_candidates.xlsx"
+)
 
 # Maximum number of different real Program Expense anchors
 # used from each expense class.
@@ -71,6 +116,32 @@ POSITIVE_PAIRS_VALIDATED_CSV_PATH = (
 POSITIVE_PAIRS_VALIDATION_REPORT_PATH = (
     OUTPUT_DATA_DIR
     / "positive_pairs_validation_report.xlsx"
+)
+
+# ============================================================
+# Negative pair validation
+# ============================================================
+
+NEGATIVE_PAIR_VALIDATOR_SYSTEM_PROMPT_PATH = (
+    BASE_DIR
+    / "prompts"
+    / "negative_pair_validator_system_prompt.md"
+)
+
+NEGATIVE_PAIR_VALIDATOR_PROMPT_PATH = (
+    BASE_DIR
+    / "prompts"
+    / "negative_pair_validator_prompt.md"
+)
+
+NEGATIVE_PAIRS_VALIDATED_CSV_PATH = (
+    OUTPUT_DATA_DIR
+    / "negative_pairs_validated.csv"
+)
+
+NEGATIVE_PAIRS_VALIDATED_EXCEL_PATH = (
+    OUTPUT_DATA_DIR
+    / "negative_pairs_validated.xlsx"
 )
 
 SYSTEM_PROMPT_PATH = BASE_DIR / "prompts" / "system_prompt.md"

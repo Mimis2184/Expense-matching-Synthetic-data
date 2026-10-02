@@ -21,7 +21,7 @@ sys.path.insert(
 # ============================================================
 
 from config import (
-    POSITIVE_PAIRS_VALIDATED_CSV_PATH,
+    POSITIVE_PAIRS_CLEAN_CSV_PATH,
     NEGATIVE_PAIRS_CSV_PATH,
     NEGATIVE_PAIRS_EXCEL_PATH,
 )
@@ -207,7 +207,7 @@ def main() -> None:
     # ========================================================
 
     positive_df = pd.read_csv(
-        POSITIVE_PAIRS_VALIDATED_CSV_PATH,
+        POSITIVE_PAIRS_CLEAN_CSV_PATH,
         encoding="utf-8-sig",
     )
 

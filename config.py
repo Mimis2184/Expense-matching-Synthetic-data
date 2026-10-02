@@ -113,6 +113,14 @@ POSITIVE_PAIRS_VALIDATED_CSV_PATH = (
     / "positive_pairs_validated.csv"
 )
 
+# Validated positives without the non-fundable class
+# ("Μη επιλέξιμες δαπάνες"), written by clean_positive_pairs.py.
+# Downstream steps should read positives from this file.
+POSITIVE_PAIRS_CLEAN_CSV_PATH = (
+    OUTPUT_DATA_DIR
+    / "positive_pairs_validated_clean.csv"
+)
+
 POSITIVE_PAIRS_VALIDATION_REPORT_PATH = (
     OUTPUT_DATA_DIR
     / "positive_pairs_validation_report.xlsx"

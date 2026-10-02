@@ -1,6 +1,5 @@
 import random
 import sys
-import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +31,7 @@ from src.easy_negative_candidate_selection import (
     detect_non_fundable_pair,
     normalize_class,
     normalize_marker_value,
+    program_text_key,
     static_validate_pair,
     to_bool,
     to_int,
@@ -136,24 +136,6 @@ MARGIN_BUCKET_EDGES = [
 # ============================================================
 # Helpers
 # ============================================================
-
-def program_text_key(
-    category,
-    subcategory,
-    description,
-) -> str:
-
-    parts = [
-        " ".join(
-            unicodedata.normalize("NFC", clean_value(value))
-            .casefold()
-            .split()
-        )
-        for value in [category, subcategory, description]
-    ]
-
-    return "\x1f".join(parts)
-
 
 def resolve_class_groups(
     actual_classes: list[str],

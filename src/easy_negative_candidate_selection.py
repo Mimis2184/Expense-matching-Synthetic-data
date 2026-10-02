@@ -392,6 +392,32 @@ def normalize_class(
 
 
 
+def program_text_key(
+    category,
+    subcategory,
+    description,
+) -> str:
+    """
+    Comparable key of the Program Expense text the validator sees:
+    Category + Subcategory + Expense Description.
+
+    Several program rows (different programs/subprograms) carry
+    exactly the same text. For the validator they are the same input.
+    """
+
+    parts = [
+        " ".join(
+            unicodedata.normalize("NFC", clean_value(value))
+            .casefold()
+            .split()
+        )
+        for value in [category, subcategory, description]
+    ]
+
+    return "\x1f".join(parts)
+
+
+
 
 
 def to_bool(
@@ -1664,6 +1690,60 @@ def build_candidate_pool(
 
 
         # ----------------------------------------------------
+        # Skip candidates with the same text as the known positive
+        #
+        # Same Category + Subcategory + Description means the
+        # validator sees exactly the input of the known positive
+        # pair, which is already VALID. Such a candidate can never
+        # become a negative, so it is not sent to the LLM.
+        #
+        # These rows are NOT labelled as positives: another
+        # program/subprogram may have different terms.
+        # ----------------------------------------------------
+
+        known_positive_rows = client_df[
+            client_df[
+                "is_known_positive"
+            ]
+        ]
+
+        positive_text_duplicate_count = 0
+
+        if not known_positive_rows.empty:
+
+            known_positive_row = known_positive_rows.iloc[0]
+
+            positive_text = program_text_key(
+                known_positive_row["program_category"],
+                known_positive_row["program_subcategory"],
+                known_positive_row["program_expense_description"],
+            )
+
+            is_positive_text_duplicate = pd.Series(
+                [
+                    program_text_key(
+                        row["program_category"],
+                        row["program_subcategory"],
+                        row["program_expense_description"],
+                    )
+                    == positive_text
+                    for _, row in possible_candidates.iterrows()
+                ],
+                index=possible_candidates.index,
+                dtype=bool,
+            )
+
+            positive_text_duplicate_count = int(
+                is_positive_text_duplicate.sum()
+            )
+
+            possible_candidates = possible_candidates[
+                ~is_positive_text_duplicate
+            ].copy()
+
+
+
+        # ----------------------------------------------------
 
         # Primary strategy:
 
@@ -1840,6 +1920,12 @@ def build_candidate_pool(
                 "outside_candidate_count":
 
                     outside_candidate_count,
+
+
+
+                "positive_text_duplicates_skipped":
+
+                    positive_text_duplicate_count,
 
 
 
@@ -2176,6 +2262,16 @@ def build_candidate_pool(
                     == "fallback_farthest_first"
 
                 ).sum(),
+
+            ),
+
+
+
+            positive_text_duplicates_skipped=(
+
+                "positive_text_duplicates_skipped",
+
+                "sum",
 
             ),
 

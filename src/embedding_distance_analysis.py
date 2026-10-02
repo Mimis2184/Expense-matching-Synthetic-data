@@ -24,7 +24,7 @@ sys.path.insert(
 # ============================================================
 
 from config import (
-    POSITIVE_PAIRS_VALIDATED_CSV_PATH,
+    POSITIVE_PAIRS_CLEAN_CSV_PATH,
     EMBEDDING_MODEL_NAME,
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_DISTANCE_CSV_PATH,
@@ -214,7 +214,7 @@ def main() -> None:
     # ========================================================
 
     positive_df = pd.read_csv(
-        POSITIVE_PAIRS_VALIDATED_CSV_PATH,
+        POSITIVE_PAIRS_CLEAN_CSV_PATH,
         encoding="utf-8-sig",
     )
 
@@ -289,6 +289,12 @@ def main() -> None:
     #
     # NOT a permanent business/client ID.
     # Used only for tracing rows in this analysis.
+    #
+    # If the positives file already carries analysis_client_id
+    # (clean_positive_pairs.py keeps the original ids after
+    # removing non-fundable rows), reuse it so the ids still
+    # match the existing negative outputs. Otherwise create it
+    # as row index + 1.
     # ========================================================
 
     positive_df = (
@@ -296,11 +302,35 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
-    positive_df[
-        "analysis_client_id"
-    ] = (
-        positive_df.index + 1
-    )
+    if "analysis_client_id" in positive_df.columns:
+
+        positive_df[
+            "analysis_client_id"
+        ] = (
+            pd.to_numeric(
+                positive_df[
+                    "analysis_client_id"
+                ],
+                errors="raise",
+            )
+            .astype(int)
+        )
+
+        if not positive_df[
+            "analysis_client_id"
+        ].is_unique:
+            raise ValueError(
+                "analysis_client_id must be unique "
+                "in the positives file."
+            )
+
+    else:
+
+        positive_df[
+            "analysis_client_id"
+        ] = (
+            positive_df.index + 1
+        )
 
     # ========================================================
     # Build embedding texts

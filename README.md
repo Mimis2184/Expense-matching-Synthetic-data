@@ -1,126 +1,129 @@
+
 # Synthetic Data for Expense Matching
 
-A proof-of-concept pipeline for generating and validating training pairs between **client expenses** and **funding-program expenses**.
+This repository is a POC(proof of concept). The question behind it is simple: can we
+build a useful training and evaluation dataset for matching **client expenses**
+(what a business plans to spend money on) to **program expenses** (what a
+funding program is willing to cover), mostly with the help of an LLM?
 
-The goal is to build a dataset for adapting and evaluating expense-matching models. A correct match must satisfy the relevant business constraints; textual or semantic similarity alone is insufficient.
+A good match is not just two texts that look alike. "Website development" and
+"digital marketing services" sound related, but if the program doesn't cover
+web development, it's not a match. That gap between *similar* and *valid* is
+what this project is about.
 
-## Task
+## What kind of pairs we build
 
-Given a client expense and a program expense, determine whether they form a valid business match within the applicable eligibility context.
-
-The pipeline distinguishes between:
-
-| Pair or case type | Description |
+| Pair type | What it means |
 |---|---|
-| Positive | A valid match between a client expense and a program expense. |
-| Easy negative | An invalid match selected from semantically more distant candidates. |
-| Hard negative | An invalid match despite strong semantic similarity. |
-| Non-lexical positive | A valid match expressed using substantially different wording. |
-| Multiple valid matches | A client expense correctly matches more than one program expense. |
+| Positive | The client expense is genuinely covered by the program expense. |
+| Easy negative | Not a match, and the two are clearly far apart. |
+| Hard (semi-hard) negative | Not a match, even though an embedding model thinks they are close. |
+| Non-lexical positive | A valid match where the client and the program share no words. |
+| Multiple valid matches | One client expense can be covered by more than one program expense. |
 
-The learning target is binary. Difficulty and non-lexical status describe examples rather than additional target classes.
+The label is always binary: match (1) or no match (0). "Easy", "hard" and
+"non-lexical" describe how difficult an example is, not extra classes.
 
-Funding eligibility is handled separately from similarity: matching the description of a non-fundable expense does not make that expense eligible for funding.
+Whether a business is *eligible* for a program (region, activity code, size)
+is a separate question, checked before matching. The expense class
+"Μη επιλέξιμες δαπάνες" (non-eligible expenses) was removed from the synthetic
+data, because matching a description of something non-fundable doesn't make it
+a positive.
 
-## Pipeline
+## How the dataset is built
 
-### 1. Positive pair generation
+**1. Positives.** We take real program expenses from 18 funding programs and
+ask GPT-4o to write realistic client expenses that each program expense would
+cover. A second, independent GPT-4o prompt (the validator) then checks every
+pair. Only pairs it accepts are kept: 426 positives.
 
-Program expenses serve as anchors for generating synthetic client expenses in the same expense class.
+**2. Ranking with embeddings.** For each client, the pretrained
+`intfloat/multilingual-e5-large` model ranks all program expenses of the same
+class by cosine distance. This ranking only tells us *which* pairs are worth
+checking; it never decides a label.
 
-Each proposed client–anchor pair is checked by a validator. Generation intent alone does not establish a positive label.
+**3. Neighbourhood size (K95).** For every class we find the smallest K that
+contains 95% of the known positives. It's an empirical guide, not a guarantee.
 
-An accepted anchor becomes a known positive for that client. Other program expenses may also be valid matches.
+**4. Easy negatives.** We look for candidates outside K95 and let the validator
+judge them. The first candidate it rejects becomes the negative for that
+client: 243 easy negatives. Candidates whose text is identical to the known
+positive are skipped, since the validator would always accept them.
 
-### 2. Semantic ranking
+**5. Semi-hard negatives.** A pilot looks at candidates just slightly further
+away than the known positive. These are the cases an embedding model is most
+likely to get wrong: 31 semi-hard negatives so far.
 
-The pipeline uses the pretrained `intfloat/multilingual-e5-large` embedding model to rank program expenses within the same expense class.
+**6. Non-lexical positives.** We define "non-lexical" with a simple word-overlap
+score (`src/lexical_score.py`): client title and description against program
+category and subcategory, after lowercasing, removing accents and stopwords,
+handling Greeklish, and matching word variants by their common beginning. A
+pair with a score of 0, meaning no shared words, counts as non-lexical. From the
+human examples we found 153 such pairs and used them as few-shot examples for
+GPT-4o to write new ones. A pilot produced 120 pairs, 89 of which really share
+no words with the program.
 
-- **Client input:** title and description, encoded as a query.
-- **Program input:** category, subcategory and description, encoded as a passage.
+## Evaluation and model choice
 
-Cosine distance is calculated as:
+The human-labelled examples (eight Excel files, one per program) are the
+ground truth. We link each of them to the exact program expense it refers to,
+remove anything used as a few-shot example, and keep **535 pairs** as the
+evaluation set (`src/build_evaluation_set.py`).
 
-```text
-distance = 1 - cosine_similarity
-```
+On that set we compared three open multilingual embedding models without any
+fine-tuning (`src/compare_embedding_models.py`): `BAAI/bge-m3`,
+`Qwen/Qwen3-Embedding-0.6B` and `Snowflake/snowflake-arctic-embed-l-v2.0`.
+Each model ranks the program expenses for every client, and we check where the
+correct one lands.
 
-Smaller distances indicate greater embedding similarity. These scores guide candidate selection; they do not determine business-valid labels.
+- Ranking only within the client's own program (closer to how the platform
+  works), all three find the right expense first about 83–86% of the time.
+- Ranking across all programs is much harder (around 26% at the top spot), partly
+  because different programs describe very similar expenses.
+- On the pairs with the least word overlap, `bge-m3` did best, and it was also
+  the fastest. **`bge-m3` is the model we'll fine-tune.**
 
-### 3. Class-specific neighbourhood calibration
+E5 was left out of the comparison: it truncates input at 512 tokens, which cuts
+off about 37% of the program descriptions. That's the one that we used to make the
+synthetic data .
 
-For each client, the pipeline records the rank of its known positive anchor.
+## Human review
 
-These ranks are aggregated by expense class to calculate coverage thresholds such as **K95**: the smallest K that includes at least 95% of the observed known positives in that class.
+LLM labels are not ground truth. To measure how reliable they are, we prepared
+an annotation file (`src/build_annotation_sample.py`) with 700 shuffled pairs:
+380 positives, 210 easy negatives, 31 semi-hard negatives and 79 non-lexical
+positives. Reviewers see our label and only write something when they disagree.
 
-K95 measures empirical coverage of known anchors. It does not guarantee coverage of every valid match.
+## Where things stand
 
-### 4. Easy-negative mining
+Done:
+- Data preparation and synthetic positive generation with validation
+- Embedding ranking, K95 analysis, easy-negative mining
+- Semi-hard-negative pilot
+- Lexical score and non-lexical few-shot pilot
+- Human evaluation set and pre-fine-tuning model comparison
+- Annotation file for human review
 
-Candidates are selected outside the class-specific K95 neighbourhood.
+Next:
+- Collect the human annotations and measure agreement with our labels
+- Decide on full runs for non-lexical and semi-hard negatives
+- Assemble the training set and fine-tune `bge-m3`
+- Compare the fine-tuned model with the pretrained one and with the
+  `text-embedding-3-large` baseline
 
-When no outside region exists, a fallback examines candidates from the most distant towards closer ones. The validator checks candidates, and the first confirmed invalid match is retained for that client.
+Nothing here claims a finished, fine-tuned model yet.
 
-Being outside K95 does not automatically make a candidate negative.
+## Things to keep in mind
 
-### 5. Semi-hard-negative mining
+- Synthetic examples carry the style and assumptions of the model that wrote them.
+- The validator can be wrong or unsure, which is why we're doing human review.
+- Similarity scores are not probabilities of a valid match.
+- A known positive is rarely the only valid match for a client.
+- Variants of the same example must stay together when splitting data, to
+  avoid leaking information between training and evaluation.
 
-A pilot explores semantically close candidates using their distance relative to the known positive.
+## Built with
 
-Candidate selection excludes known positive pairs, previously retained easy-negative pairs and non-fundable cases according to the mining rules.
-
-A limited validation budget per client helps control API usage.
-
-### 6. Validation and review
-
-LLM validation checks candidate matches against the supplied business information. Cached verdicts and checkpointing support reuse and incremental processing where implemented.
-
-LLM-validated labels are distinguished from human-reviewed labels. Manual review is required to assess label quality, particularly for ambiguous and difficult cases.
-
-## Current Status
-
-Implemented components include:
-
-- Data preparation.
-- Synthetic positive generation and validation.
-- Same-class embedding ranking.
-- Known-positive rank and coverage analysis.
-- Easy-negative mining.
-- A semi-hard-negative pilot.
-- Validation caching and intermediate output generation.
-
-Work in progress:
-
-- Manual review of the semi-hard-negative pilot.
-- Selection of a methodology for non-lexical positive mining and generation.
-- Explicit handling of additional valid matches.
-- Preparation of training and independent evaluation datasets.
-
-The E5 model currently supports candidate selection. This repository does not claim completed fine-tuning or demonstrated downstream performance improvements.
-
-## Design Principles
-
-- Expense category is a hard constraint.
-- Required expense fields are used together when assessing a match.
-- Same-class membership alone does not establish validity.
-- Low lexical overlap alone does not establish a non-lexical positive.
-- Low embedding similarity does not establish a negative.
-- A client may have multiple valid program matches.
-- Generated variants and related examples must be handled carefully when creating training and evaluation splits.
-
-## Technologies
-
-- Python
-- pandas and NumPy
-- Multilingual E5 embeddings
-- Azure OpenAI for generation and validation
-- CSV and Excel outputs for analysis and review
-
-## Limitations
-
-- Synthetic examples may reflect the language and assumptions of the generation model.
-- LLM validation can produce incorrect or uncertain labels.
-- Similarity scores are not calibrated probabilities of business validity.
-- Known-positive anchors do not provide an exhaustive list of valid matches.
-- Coverage thresholds depend on the available examples and candidate pool.
-- Non-lexical generation and downstream model evaluation remain ongoing work.
+Python, pandas, NumPy, sentence-transformers (E5, bge-m3, Qwen3, Snowflake
+Arctic), Azure OpenAI (GPT-4o) for generation and validation, and Excel for
+review.

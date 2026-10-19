@@ -63,21 +63,6 @@ POSITIVE_PAIR_GENERATION_PROMPT_PATH = (
 # Approximate total number of proposed positive pairs to generate
 POSITIVE_TARGET_TOTAL = 500
 
-# ============================================================
-# Negative pair generation
-# ============================================================
-
-
-NEGATIVE_PAIRS_CSV_PATH = (
-    OUTPUT_DATA_DIR
-    / "negative_pairs_candidates.csv"
-)
-
-NEGATIVE_PAIRS_EXCEL_PATH = (
-    OUTPUT_DATA_DIR
-    / "negative_pairs_candidates.xlsx"
-)
-
 # Maximum number of different real Program Expense anchors
 # used from each expense class.
 POSITIVE_ANCHORS_PER_CLASS = 10
@@ -158,7 +143,6 @@ GENERATION_PROMPT_PATH = BASE_DIR / "prompts" / "generation_prompt.md"
 TEST_OUTPUT_PATH = OUTPUT_DATA_DIR / "synthetic_test.csv"
 
 TEST_N_TO_GENERATE = 5
-PAIR_SAMPLE_N_CLIENTS = 5
 
 TEST_EXPENSE_CLASS = (
     "Εξοπλισμός αγορά/κατασκευή, Εξοπλισμός χρήση (αποσβέσεις/μισθώσεις)"

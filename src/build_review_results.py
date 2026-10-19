@@ -23,7 +23,7 @@ from config import (
 
 
 # ============================================================
-# Review results (100 pairs)
+# Review results (100 or 300 pairs)
 #
 # Joins the blind review input, our labels and Claude's
 # decisions into one Excel for the manual review of the
@@ -35,13 +35,20 @@ from config import (
 # Local only: no API call, input files are not modified.
 # ============================================================
 
-INPUT_PATH = OUTPUT_DATA_DIR / "review_100_pairs_without_labels.xlsx"
+def sample_paths(sample: int) -> tuple[Path, Path, Path, Path]:
+    """
+    Input, key, decisions and output paths of one review sample.
+    """
 
-KEY_PATH = OUTPUT_DATA_DIR / "review_100_pairs_our_labels.xlsx"
+    prefix = OUTPUT_DATA_DIR / f"review_{sample}_pairs"
 
-DECISIONS_PATH = OUTPUT_DATA_DIR / "review_100_pairs_claude_decisions.csv"
+    return (
+        Path(f"{prefix}_without_labels.xlsx"),
+        Path(f"{prefix}_our_labels.xlsx"),
+        Path(f"{prefix}_claude_decisions.csv"),
+        Path(f"{prefix}_comparison.xlsx"),
+    )
 
-OUTPUT_PATH = OUTPUT_DATA_DIR / "review_100_pairs_comparison.xlsx"
 
 DECISION_TO_LABEL = {
     "GENERIC": "Match",
@@ -55,6 +62,7 @@ OUTPUT_COLUMNS = [
     "review_id",
     "source_pair_id",
     "pair_category",
+    "seen_before",
     "client_expense_title",
     "client_expense_description",
     "expense_class",
@@ -89,7 +97,7 @@ def clean_text(value) -> str:
 def main() -> None:
 
     parser = argparse.ArgumentParser(
-        description="Build the 100-pair review comparison."
+        description="Build the 100- or 300-pair review comparison."
     )
 
     parser.add_argument(
@@ -98,7 +106,17 @@ def main() -> None:
         help="Allow replacing an existing comparison file.",
     )
 
+    parser.add_argument(
+        "--sample",
+        type=int,
+        choices=[100, 300],
+        default=100,
+        help="Which review sample to build.",
+    )
+
     args = parser.parse_args()
+
+    INPUT_PATH, KEY_PATH, DECISIONS_PATH, OUTPUT_PATH = sample_paths(args.sample)
 
     if OUTPUT_PATH.exists() and not args.overwrite:
         raise FileExistsError(
@@ -113,6 +131,9 @@ def main() -> None:
         DECISIONS_PATH,
         encoding="utf-8-sig",
     )
+
+    if "seen_before" not in decisions_df.columns:
+        decisions_df["seen_before"] = False
 
     # --------------------------------------------------------
     # Safety assertions

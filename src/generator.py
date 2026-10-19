@@ -114,9 +114,11 @@ def create_llm(
             + ", ".join(missing)
         )
 
+    assert api_key is not None
+
     return AzureChatOpenAI(
         azure_endpoint=endpoint,
-        api_key=api_key,
+        api_key=SecretStr(api_key),
         api_version=api_version,
         azure_deployment=deployment,
         temperature=temperature,

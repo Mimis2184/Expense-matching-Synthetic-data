@@ -36,7 +36,7 @@ from src.generator import (
 # ============================================================
 # Check pairs with matching guideline v0.4
 #
-# GPT-4o judges each pair with prompts/matching_guidelines_v0.4_100pairs.md
+# GPT-4o judges each pair with prompts/matching_guidelines_v0.5.md
 # as system prompt (temperature 0, one pair per call) and returns
 # decision, confidence, evidence and reason.
 #
@@ -55,7 +55,7 @@ from src.generator import (
 # Input files are not modified.
 # ============================================================
 
-GUIDELINE_PATH = BASE_DIR / "prompts" / "matching_guidelines_v0.4_100pairs.md"
+GUIDELINE_PATH = BASE_DIR / "prompts" / "matching_guidelines_v0.5.md"
 
 PENDING = "Pending"
 
@@ -181,7 +181,6 @@ def build_user_message(row: pd.Series) -> str:
         "",
         f"- **title:** {clean_text(row['client_expense_title'])}",
         f"- **description:** {clean_text(row['client_expense_description'])}",
-        f"- **expense_class:** {clean_text(row['expense_class'])}",
         "",
         "### Candidates",
         "",

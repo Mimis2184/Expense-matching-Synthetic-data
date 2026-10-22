@@ -19,7 +19,7 @@ from sklearn.metrics import roc_auc_score
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from config import OUTPUT_DATA_DIR
+from config import OUTPUT_DATA_DIR, PROCESSED_DATA_DIR
 from src.compare_embedding_models import (
     CACHE_DIR,
     clean_value,
@@ -59,6 +59,9 @@ MODELS = [
 VALIDATION_PATH = OUTPUT_DATA_DIR / "review_100_pairs_comparison.xlsx"
 TEST_PATH = OUTPUT_DATA_DIR / "review_300_pairs_comparison.xlsx"
 OUTPUT_PATH = OUTPUT_DATA_DIR / "embeddings_on_pairs_results.xlsx"
+
+# Fine-tuning data: no validation or test pair may appear in it.
+TRAINING_PATH = PROCESSED_DATA_DIR / "training_pairs_poc.csv"
 
 LABELS = {"Match": 1, "No match": 0}
 CATEGORIES = [
@@ -152,6 +155,21 @@ def load_inputs():
         )
     if validation["label"].nunique() != 2:
         raise ValueError("Validation must contain both Match and No match labels.")
+    # Guard against leakage, e.g. a disagreement used for training that
+    # later gets a manual_review_label and would enter the test set.
+    if TRAINING_PATH.exists():
+        training_ids = set(
+            pd.read_csv(TRAINING_PATH, encoding="utf-8-sig")["source_pair_id"].map(clean_value)
+        )
+        for name, df in [("validation", validation), ("test", test)]:
+            overlap = training_ids & set(df["source_pair_id"])
+            if overlap:
+                raise ValueError(
+                    f"{len(overlap)} {name} pairs are also in {TRAINING_PATH.name}: "
+                    f"{sorted(overlap)[:5]}"
+                )
+    else:
+        print(f"Note: {TRAINING_PATH.name} not found; training overlap not checked.")
     return validation, test, excluded
 
 

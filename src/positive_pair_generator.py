@@ -1,3 +1,5 @@
+import argparse
+import io
 import json
 import sys
 from pathlib import Path
@@ -29,6 +31,9 @@ from config import (
     POSITIVE_ANCHORS_PER_CLASS,
     POSITIVE_PAIRS_CSV_PATH,
     POSITIVE_PAIRS_EXCEL_PATH,
+    POSITIVE_PAIRS_CLEAN_CSV_PATH,
+    POSITIVE_PAIRS_V05_UNCOVERED_CSV_PATH,
+    POSITIVE_PAIRS_V05_UNCOVERED_EXCEL_PATH,
 )
 
 
@@ -369,6 +374,111 @@ def build_generation_plan(
 
 
 # ============================================================
+# Build generation plan for uncovered Program Expenses
+# ============================================================
+
+def build_uncovered_generation_plan(
+    valid_df: pd.DataFrame,
+    per_anchor: int,
+) -> pd.DataFrame:
+    """
+    Select every valid, fundable anchor with no existing positive.
+    IDs are the original program CSV row index + 1, before filtering.
+    """
+
+    positives_df = pd.read_csv(
+        POSITIVE_PAIRS_CLEAN_CSV_PATH,
+        encoding="utf-8-sig",
+    )
+
+    if "program_expense_id" not in positives_df.columns:
+        raise ValueError(
+            f"{POSITIVE_PAIRS_CLEAN_CSV_PATH.name}: missing program_expense_id."
+        )
+
+    positive_ids = pd.to_numeric(
+        positives_df["program_expense_id"],
+        errors="raise",
+    )
+
+    if (
+        positive_ids.isna().any()
+        or (positive_ids <= 0).any()
+        or (positive_ids % 1 != 0).any()
+    ):
+        raise ValueError("Existing positives must have valid integer program_expense_id values.")
+
+    covered_ids = set(positive_ids.astype(int))
+
+    non_fundable = normalize_class("Μη επιλέξιμες δαπάνες")
+
+    plan = valid_df[
+        ~valid_df["program_expense_id"].isin(covered_ids)
+        & valid_df["expense_class"].map(normalize_class).ne(non_fundable)
+    ].copy().reset_index(drop=True)
+
+    plan["n_to_generate"] = per_anchor
+
+    assert not plan["program_expense_id"].isin(covered_ids).any(), (
+        "An uncovered anchor already has a positive."
+    )
+
+    assert plan["program_expense_id"].is_unique
+
+    return plan
+
+
+# ============================================================
+# Preview prompts without generation
+# ============================================================
+
+def preview_generation_plan(generation_plan: pd.DataFrame) -> None:
+    """
+    Build prompts only. Never construct an LLM or write any file.
+    The estimate includes both prompts for each planned API call.
+    """
+
+    characters = 0
+    built = 0
+    failed_ids = []
+
+    for _, program_row in generation_plan.iterrows():
+        try:
+            system_prompt, generation_prompt = build_positive_prompt(
+                program_row=program_row,
+                n_to_generate=int(program_row["n_to_generate"]),
+            )
+        except Exception as exc:
+            anchor_id = int(program_row["program_expense_id"])
+            failed_ids.append(anchor_id)
+            print(f"Prompt preparation failed for program_expense_id={anchor_id}: {exc}")
+            continue
+
+        characters += len(system_prompt) + len(generation_prompt)
+
+        if built == 0:
+            print()
+            print("=" * 60)
+            print(f"DRY RUN: prompt example for program_expense_id={int(program_row['program_expense_id'])}")
+            print("SYSTEM PROMPT")
+            print(system_prompt)
+            print()
+            print("GENERATION PROMPT")
+            print(generation_prompt)
+            print("=" * 60)
+
+        built += 1
+
+    print()
+    print(f"Prompts prepared: {built}/{len(generation_plan)} anchors")
+    print(f"Total input prompt characters: {characters}")
+    print(f"Estimated input tokens (characters / 4): {characters / 4:,.0f}")
+    if failed_ids:
+        print("Estimate excludes anchors whose prompts could not be prepared:", failed_ids)
+    print("Dry run complete: no API calls, no files written.")
+
+
+# ============================================================
 # Build generation prompt
 # ============================================================
 
@@ -645,6 +755,58 @@ def generate_for_program_expense(
 
 def main() -> None:
 
+    parser = argparse.ArgumentParser(
+        description="Generate proposed positive pairs, balanced or for uncovered anchors."
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=["balanced", "uncovered"],
+        default="balanced",
+        help="Anchor selection (default: the original balanced generation).",
+    )
+
+    parser.add_argument(
+        "--per-anchor",
+        type=int,
+        default=1,
+        help="Proposed positives per uncovered anchor (default: 1).",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the plan, example prompts and token estimate; no API calls or writes.",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing uncovered outputs. Balanced mode retains its original overwrite behavior.",
+    )
+
+    args = parser.parse_args()
+
+    if args.per_anchor < 1:
+        parser.error("--per-anchor must be a positive integer.")
+
+    if args.mode == "uncovered":
+        csv_output_path = POSITIVE_PAIRS_V05_UNCOVERED_CSV_PATH
+        excel_output_path = POSITIVE_PAIRS_V05_UNCOVERED_EXCEL_PATH
+
+        assert csv_output_path not in {POSITIVE_PAIRS_CSV_PATH, POSITIVE_PAIRS_EXCEL_PATH}
+        assert excel_output_path not in {POSITIVE_PAIRS_CSV_PATH, POSITIVE_PAIRS_EXCEL_PATH}
+
+        if not args.dry_run and not args.overwrite:
+            for path in [csv_output_path, excel_output_path]:
+                if path.exists():
+                    raise FileExistsError(
+                        f"{path} already exists. Use --overwrite to replace it."
+                    )
+    else:
+        csv_output_path = POSITIVE_PAIRS_CSV_PATH
+        excel_output_path = POSITIVE_PAIRS_EXCEL_PATH
+
     # --------------------------------------------------------
     # Load Program Expenses
     # --------------------------------------------------------
@@ -698,11 +860,17 @@ def main() -> None:
     # Build balanced generation plan
     # --------------------------------------------------------
 
-    generation_plan = (
-        build_generation_plan(
-            valid_program_df
+    if args.mode == "uncovered":
+        generation_plan = build_uncovered_generation_plan(
+            valid_program_df,
+            per_anchor=args.per_anchor,
         )
-    )
+    else:
+        generation_plan = (
+            build_generation_plan(
+                valid_program_df
+            )
+        )
 
     planned_total = int(
         generation_plan[
@@ -741,6 +909,33 @@ def main() -> None:
         planned_distribution.to_string()
     )
 
+    if args.mode == "uncovered":
+        print()
+        print("Selected anchors per expense class:")
+        print(generation_plan["expense_class"].value_counts().sort_index().to_string())
+        print()
+        print("Selected anchors per program:")
+        program_columns = [
+            column for column in ["source_file", "program_title"]
+            if column in generation_plan.columns
+        ]
+        if not program_columns:
+            raise ValueError("Program data must contain source_file or program_title.")
+        print(
+            generation_plan.groupby(program_columns, dropna=False)
+            .size().to_string()
+        )
+
+    if generation_plan.empty:
+        print("No uncovered anchors remain; requested 0 positives, generated 0.")
+        print("Failed anchors: 0; program_expense_id: []")
+        print("No API calls, no files written.")
+        return
+
+    if args.dry_run:
+        preview_generation_plan(generation_plan)
+        return
+
     # --------------------------------------------------------
     # Create LLM once
     # --------------------------------------------------------
@@ -754,6 +949,8 @@ def main() -> None:
     # --------------------------------------------------------
 
     rows = []
+
+    failed_anchor_ids = []
 
     for counter, (_, program_row) in enumerate(
         generation_plan.iterrows(),
@@ -822,6 +1019,8 @@ def main() -> None:
             )
 
         except Exception as exc:
+
+            failed_anchor_ids.append(int(program_row["program_expense_id"]))
 
             # One failed anchor does not terminate
             # the entire generation process.
@@ -917,6 +1116,12 @@ def main() -> None:
     )
 
     if positive_df.empty:
+
+        print(f"Requested proposed positives: {planned_total}")
+        print("Actual proposed positives: 0")
+        print(f"Failed anchors: {len(failed_anchor_ids)}")
+        print("Failed program_expense_id values:", failed_anchor_ids)
+        print("No output files written.")
 
         raise ValueError(
             "No positive pairs were generated."
@@ -1036,22 +1241,38 @@ def main() -> None:
     # Save
     # ========================================================
 
-    POSITIVE_PAIRS_CSV_PATH.parent.mkdir(
+    if args.mode == "uncovered":
+        positive_df["generation_run"] = "v05_uncovered"
+
+    # Prepare both files before writing either output. Uncovered mode
+    # never writes to the balanced generation paths.
+    csv_bytes = positive_df.to_csv(index=False).encode("utf-8-sig")
+    excel_buffer = io.BytesIO()
+    positive_df.to_excel(
+        excel_buffer,
+        index=False,
+        engine="openpyxl",
+    )
+
+    csv_output_path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    positive_df.to_csv(
-        POSITIVE_PAIRS_CSV_PATH,
-        index=False,
-        encoding="utf-8-sig",
-    )
+    exclusive = args.mode == "uncovered" and not args.overwrite
 
-    positive_df.to_excel(
-        POSITIVE_PAIRS_EXCEL_PATH,
-        index=False,
-        engine="openpyxl",
-    )
+    if exclusive:
+        for path in [csv_output_path, excel_output_path]:
+            if path.exists():
+                raise FileExistsError(
+                    f"{path} already exists. Use --overwrite to replace it."
+                )
+
+    with csv_output_path.open("xb" if exclusive else "wb") as handle:
+        handle.write(csv_bytes)
+
+    with excel_output_path.open("xb" if exclusive else "wb") as handle:
+        handle.write(excel_buffer.getvalue())
 
     # ========================================================
     # Summary
@@ -1066,13 +1287,16 @@ def main() -> None:
 
     print(
         f"Target proposed positives: "
-        f"{POSITIVE_TARGET_TOTAL}"
+        f"{planned_total}"
     )
 
     print(
         f"Actual proposed positives: "
         f"{len(positive_df)}"
     )
+
+    print(f"Failed anchors: {len(failed_anchor_ids)}")
+    print("Failed program_expense_id values:", failed_anchor_ids)
 
     print(
         f"Expense classes covered: "
@@ -1097,14 +1321,14 @@ def main() -> None:
 
     print(
         f"Saved CSV:\n"
-        f"{POSITIVE_PAIRS_CSV_PATH}"
+        f"{csv_output_path}"
     )
 
     print()
 
     print(
         f"Saved Excel:\n"
-        f"{POSITIVE_PAIRS_EXCEL_PATH}"
+        f"{excel_output_path}"
     )
 
     print("=" * 60)

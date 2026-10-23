@@ -90,6 +90,16 @@ POSITIVE_PAIRS_EXCEL_PATH = (
     / "positive_pairs_test.xlsx"
 )
 
+POSITIVE_PAIRS_V05_UNCOVERED_CSV_PATH = (
+    OUTPUT_DATA_DIR
+    / "positive_pairs_v05_uncovered.csv"
+)
+
+POSITIVE_PAIRS_V05_UNCOVERED_EXCEL_PATH = (
+    OUTPUT_DATA_DIR
+    / "positive_pairs_v05_uncovered.xlsx"
+)
+
 # ============================================================
 # Positive pair validation
 # ============================================================

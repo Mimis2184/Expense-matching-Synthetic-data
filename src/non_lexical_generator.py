@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import sys
 import unicodedata
@@ -57,6 +58,8 @@ from src.lexical_score import (
 #            NO API call (default)
 #   pilot    one group per expense class
 #   full     every group
+#   full_v05 linked program expenses, grouped by their full text;
+#            --dry-run previews this mode without writing files
 #
 # No validator is called. The new pairs are scored locally with
 # new_score and reviewed manually.
@@ -87,6 +90,19 @@ DRY_RUN_PROMPTS_PATH = (
 N_PER_EXAMPLE = 3
 
 MAX_ROWS_PER_CALL = 10
+
+V05_SYSTEM_PROMPT_PATH = BASE_DIR / "prompts" / "non_lexical_system_prompt_v05.md"
+V05_GENERATION_PROMPT_PATH = BASE_DIR / "prompts" / "non_lexical_generation_prompt_v05.md"
+V05_EXCEL_PATH = OUTPUT_DATA_DIR / "non_lexical_pairs_v05.xlsx"
+V05_CSV_PATH = OUTPUT_DATA_DIR / "non_lexical_pairs_v05.csv"
+
+V05_PAIR_COLUMNS = [
+    "source_row", "source_client_expense", "source_client_expense_description",
+    "client_expense_title", "client_expense_description", "client_expense_class",
+    "program_category", "program_subcategory", "program_expense_class",
+    "new_score", "manual_review", "program_expense_id", "program_title",
+    "subprogram_name", "program_expense_description", "generation_run",
+]
 
 TEMPERATURE = 0.8
 
@@ -550,6 +566,215 @@ def generate_for_chunk(
 
 
 # ============================================================
+# Full v0.5: resolve anchors before generation
+# ============================================================
+
+def link_examples_v05(examples: pd.DataFrame, program_df: pd.DataFrame):
+    """
+    Reuse the annotation resolver, with strict uniqueness across
+    matching human rows. Missing descriptions do not exclude a row.
+    """
+
+    from src.build_annotation_sample import (
+        load_human_pairs,
+        match_example_program_expense,
+    )
+
+    human = load_human_pairs()
+    linked_rows = []
+    issues = []
+
+    for _, example in examples.iterrows():
+
+        program = match_example_program_expense(
+            example,
+            human,
+            program_df,
+            require_unique_human_program=True,
+        )
+
+        if program is None:
+            issues.append({
+                "source_rows": str(int(example["source_row"])),
+                "issue": "Excluded before generation: no unique linked program expense.",
+            })
+            continue
+
+        program_class = clean_value(program["expense_class"])
+
+        if not program_class or group_key(example[COLUMNS["client_class"]]) != group_key(program_class):
+            issues.append({
+                "source_rows": str(int(example["source_row"])),
+                "issue": "Excluded before generation: example client and linked program classes differ or are empty.",
+            })
+            continue
+
+        linked = example.to_dict()
+        linked[COLUMNS["client_class"]] = program_class
+        linked[COLUMNS["program_class"]] = program_class
+        linked[COLUMNS["category"]] = clean_value(program["category"])
+        linked[COLUMNS["subcategory"]] = clean_value(program["subcategory"])
+        linked["program_expense_id"] = int(program["program_expense_id"])
+        linked["program_title"] = clean_value(program.get("program_title", ""))
+        linked["subprogram_name"] = clean_value(program.get("subprogram_name", ""))
+        linked["program_expense_description"] = clean_value(program["expense_description"])
+
+        # Exact stripped fields: two different descriptions never share
+        # a prompt, even if their categories are otherwise identical.
+        linked["group"] = json.dumps([
+            program_class,
+            linked[COLUMNS["category"]],
+            linked[COLUMNS["subcategory"]],
+            linked["program_expense_description"],
+        ], ensure_ascii=False)
+
+        linked_rows.append(linked)
+
+    extra_columns = [
+        "program_expense_id", "program_title", "subprogram_name", "program_expense_description",
+    ]
+    linked_df = pd.DataFrame(linked_rows, columns=list(examples.columns) + extra_columns)
+
+    return linked_df, issues
+
+
+def run_full_v05(args) -> None:
+    """
+    Separate orchestration so the original modes keep their behavior.
+    Use the existing example filtering, chunking and client validation.
+    """
+
+    from src.build_evaluation_set import load_program_expenses
+
+    for path in [V05_EXCEL_PATH, V05_CSV_PATH]:
+        if path.exists() and not args.overwrite and not args.dry_run:
+            raise FileExistsError(f"{path} already exists. Use --overwrite to replace it.")
+
+    examples = load_examples()
+    program_df = load_program_expenses()
+    linked, all_issues = link_examples_v05(examples, program_df)
+    chunks = build_chunks(linked)
+
+    excluded_rows = [issue["source_rows"] for issue in all_issues]
+    no_description = int(linked["program_expense_description"].eq("").sum())
+
+    print("=" * 70)
+    print("NON-LEXICAL FEW-SHOT GENERATION V0.5")
+    print("=" * 70)
+    print("Non-lexical examples (after duplicate titles):", len(examples))
+    print("Linked examples:", len(linked))
+    print("Excluded examples:", len(excluded_rows))
+    print("Excluded source_row values:", ", ".join(excluded_rows) or "none")
+    print("Linked examples without program description:", no_description)
+    print("Groups:", linked["group"].nunique())
+    print("Planned calls:", len(chunks))
+    print("Clients expected:", len(linked) * N_PER_EXAMPLE)
+
+    system_prompt = read_text_file(V05_SYSTEM_PROMPT_PATH)
+    generation_template = read_text_file(V05_GENERATION_PROMPT_PATH)
+    prompts = []
+
+    for chunk in chunks:
+        description = clean_value(chunk["program_expense_description"].iloc[0])
+        # Fill the new field before the existing builder inserts examples.
+        template = generation_template.replace(
+            "{program_expense_description}", description or "(no description)",
+        )
+        prompts.append(build_prompt(chunk, system_prompt, template))
+
+    if args.dry_run:
+        if prompts:
+            print()
+            print("FULL SYSTEM PROMPT (first call)")
+            print(prompts[0][0])
+            print()
+            print("FULL HUMAN PROMPT (first call)")
+            print(prompts[0][1])
+        else:
+            print("No linked examples; no call prompt is available.")
+        characters = sum(len(system) + len(human) for system, human in prompts)
+        print("Total input prompt characters:", characters)
+        print(f"Estimated input tokens (characters / 4): {characters / 4:,.0f}")
+        print("Calls made: 0. No output files written.")
+        print("=" * 70)
+        return
+
+    # Create an LLM only when there is actual generation to perform.
+    llm = create_llm(temperature=TEMPERATURE) if chunks else None
+    all_pairs = []
+
+    for number, (chunk, (system_text, human_text)) in enumerate(zip(chunks, prompts), start=1):
+
+        print(f"Call {number}/{len(chunks)} ({len(chunk)} examples)")
+
+        pairs, issues = generate_for_chunk(llm, chunk, system_text, human_text)
+
+        examples_by_row = {
+            int(row["source_row"]): row for _, row in chunk.iterrows()
+        }
+
+        for pair in pairs:
+            example = examples_by_row[int(pair["source_row"])]
+            pair.update({
+                "program_expense_id": int(example["program_expense_id"]),
+                "program_title": example["program_title"],
+                "subprogram_name": example["subprogram_name"],
+                "program_expense_description": example["program_expense_description"],
+                "generation_run": "v05_non_lexical",
+            })
+
+        all_pairs.extend(pairs)
+        all_issues.extend(issues)
+
+    pairs_df = pd.DataFrame(all_pairs, columns=V05_PAIR_COLUMNS)
+    issues_df = pd.DataFrame(all_issues, columns=["source_rows", "issue"])
+
+    if not pairs_df.empty:
+        pairs_df = pairs_df.sort_values("source_row", kind="mergesort").reset_index(drop=True)
+
+        assert pairs_df["program_expense_id"].isin(program_df["program_expense_id"]).all()
+        classes_by_id = program_df.set_index("program_expense_id")["expense_class"].map(group_key)
+        linked_classes = pairs_df["program_expense_id"].map(classes_by_id)
+        assert pairs_df["program_expense_class"].map(group_key).eq(linked_classes).all()
+        assert pairs_df["client_expense_class"].map(group_key).eq(linked_classes).all()
+
+    assert "label" not in pairs_df.columns
+
+    # Prepare both outputs, then protect both destinations before saving.
+    csv_bytes = pairs_df.to_csv(index=False).encode("utf-8-sig")
+    excel_buffer = io.BytesIO()
+
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        pairs_df.to_excel(writer, sheet_name="pairs", index=False)
+        issues_df.to_excel(writer, sheet_name="issues", index=False)
+
+    OUTPUT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    for path in [V05_EXCEL_PATH, V05_CSV_PATH]:
+        if path.exists() and not args.overwrite:
+            raise FileExistsError(f"{path} already exists. Use --overwrite to replace it.")
+
+    mode = "wb" if args.overwrite else "xb"
+
+    with V05_EXCEL_PATH.open(mode) as handle:
+        handle.write(excel_buffer.getvalue())
+
+    with V05_CSV_PATH.open(mode) as handle:
+        handle.write(csv_bytes)
+
+    print()
+    print("Calls made:", len(chunks))
+    print("Clients generated:", len(pairs_df))
+    print("Clients with new_score = 0:", int(pairs_df["new_score"].eq(0).sum()))
+    print("Issues:", len(issues_df))
+    if not issues_df.empty:
+        print(issues_df.to_string(index=False))
+    print("Saved:", V05_EXCEL_PATH)
+    print("Saved:", V05_CSV_PATH)
+    print("=" * 70)
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -563,7 +788,7 @@ def main() -> None:
 
     parser.add_argument(
         "--mode",
-        choices=["dry_run", "pilot", "full"],
+        choices=["dry_run", "pilot", "full", "full_v05"],
         default="dry_run",
     )
 
@@ -573,7 +798,20 @@ def main() -> None:
         help="Allow replacing an existing output Excel.",
     )
 
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview full_v05 prompts and counts without API calls or output files.",
+    )
+
     args = parser.parse_args()
+
+    if args.dry_run and args.mode != "full_v05":
+        parser.error("--dry-run is supported with --mode full_v05; use --mode dry_run for the original preview.")
+
+    if args.mode == "full_v05":
+        run_full_v05(args)
+        return
 
     # --------------------------------------------------------
     # Examples and calls

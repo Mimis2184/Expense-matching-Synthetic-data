@@ -292,6 +292,53 @@ def load_human_pairs() -> pd.DataFrame:
     return human
 
 
+def match_example_program_expense(
+    example: pd.Series,
+    human: pd.DataFrame,
+    program_df: pd.DataFrame,
+    require_unique_human_program: bool = False,
+) -> pd.Series | None:
+    """
+    Resolve a score-file example through its human pair to a program.
+    By default, keep the annotation loader's first-human-match rule.
+    Strict mode requires all matching human rows to resolve uniquely
+    to the same program expense, before generating new v0.5 clients.
+    """
+
+    human_match = human[
+        (human["_Business_Expense_key"] == text_key(example["Client Expense"]))
+        & (human["_Business_Expense_description_key"] == text_key(example["Client Expense Description"]))
+        & (human["_Category_key"] == text_key(example["Ideal Expense Category"]))
+        & (human["_Subcategory_key"] == text_key(example["Ideal Expense Subcategory"]))
+    ]
+
+    if human_match.empty:
+        return None
+
+    human_rows = human_match if require_unique_human_program else human_match.head(1)
+
+    matches = []
+
+    for _, human_row in human_rows.iterrows():
+
+        program_match = program_df[
+            (program_df["_title_key"] == text_key(human_row["Program_name"]))
+            & (program_df["_subprogram"] == to_int_or_none(human_row["Subprogram_ID"]))
+            & (program_df["_category_key"] == text_key(human_row["Category"]))
+            & (program_df["_subcategory_key"] == text_key(human_row["Subcategory"]))
+        ]
+
+        if len(program_match) != 1:
+            return None
+
+        matches.append(program_match.iloc[0])
+
+    if len({int(row["program_expense_id"]) for row in matches}) != 1:
+        return None
+
+    return matches[0]
+
+
 def load_non_lexical_pairs(
     program_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, int]:
@@ -323,31 +370,11 @@ def load_non_lexical_pairs(
 
         example = scores.iloc[int(row["source_row"]) - FIRST_EXCEL_ROW]
 
-        human_match = human[
-            (human["_Business_Expense_key"] == text_key(example["Client Expense"]))
-            & (human["_Business_Expense_description_key"] == text_key(example["Client Expense Description"]))
-            & (human["_Category_key"] == text_key(example["Ideal Expense Category"]))
-            & (human["_Subcategory_key"] == text_key(example["Ideal Expense Subcategory"]))
-        ]
+        program = match_example_program_expense(example, human, program_df)
 
-        if human_match.empty:
+        if program is None:
             excluded += 1
             continue
-
-        human_row = human_match.iloc[0]
-
-        program_match = program_df[
-            (program_df["_title_key"] == text_key(human_row["Program_name"]))
-            & (program_df["_subprogram"] == to_int_or_none(human_row["Subprogram_ID"]))
-            & (program_df["_category_key"] == text_key(human_row["Category"]))
-            & (program_df["_subcategory_key"] == text_key(human_row["Subcategory"]))
-        ]
-
-        if len(program_match) != 1:
-            excluded += 1
-            continue
-
-        program = program_match.iloc[0]
 
         rows.append(
             {

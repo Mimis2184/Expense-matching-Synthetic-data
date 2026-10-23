@@ -16,6 +16,7 @@ The generated client expense must:
 - describe an expense that is clearly covered by the program expense,
 - respect explicit inclusions, exclusions, restrictions and conditions
   stated in the program expense description,
+- state explicitly any property that the program expense label or description requires (e.g. electric, new and unused, new hire, disability), so that the match does not depend on an assumption,
 - resemble the writing style of real client expense examples,
 - be realistic as something a client could enter in an application,
 - not simply copy the wording of the program expense,

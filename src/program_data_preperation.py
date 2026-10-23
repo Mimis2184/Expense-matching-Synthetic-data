@@ -1,7 +1,12 @@
 from pathlib import Path
+import sys
 import warnings
 
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config import CLASS_RENAMES
 
 
 # ============================================================
@@ -314,6 +319,16 @@ def process_program_file(path: Path):
                 if isinstance(x, str)
                 else x
             )
+        )
+
+    # --------------------------------------------------------
+    # Class renames (Strategy). Some programs use the class
+    # name as subcategory, so both columns are renamed.
+    # --------------------------------------------------------
+
+    for column in ["expense_class", "subcategory"]:
+        df_expenses[column] = df_expenses[column].replace(
+            CLASS_RENAMES
         )
 
     # --------------------------------------------------------

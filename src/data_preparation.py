@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import CLIENT_DATA_PATH, CLEAN_CLIENT_DATA_PATH
+from config import CLASS_RENAMES, CLIENT_DATA_PATH, CLEAN_CLIENT_DATA_PATH
 
 
 def prepare_client_data() -> None:
@@ -49,6 +49,9 @@ def prepare_client_data() -> None:
         "expense_category",
     ]:
         df[column] = df[column].astype(str).str.strip()
+
+    # Μετονομασία κλάσεων (Strategy), π.χ. Μισθοδοσία χωρίς "(όπως προβλέπεται από τον ΓΑΚ)"
+    df["expense_category"] = df["expense_category"].replace(CLASS_RENAMES)
 
     # 5. Αφαιρούμε κενά strings
     df = df[

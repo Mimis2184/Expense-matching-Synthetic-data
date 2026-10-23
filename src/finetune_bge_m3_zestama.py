@@ -40,12 +40,13 @@ from src.evaluate_embeddings_on_pairs import (
 
 
 # ============================================================
-# BGE-M3 fine-tuning (small POC / zestama)
+# BGE-M3 fine-tuning (zestama / final_v05)
 #
 # Training texts are used exactly as stored in the CSV.
-# Validation uses the baseline loader and text formatter.
+# Zestama validation uses the baseline loader and text formatter.
+# Final v0.5 uses the stored training / validation texts as-is.
 # Validation is only an evaluator, never a training dataset.
-# The test set is not read by this script.
+# Test rows are never used for training or checkpoint selection.
 #
 # Best checkpoint: validation cosine average precision.
 # The evaluator's F1 uses its own validation-optimal threshold;
@@ -56,7 +57,9 @@ from src.evaluate_embeddings_on_pairs import (
 # ============================================================
 
 TRAINING_PATH = PROCESSED_DATA_DIR / "training_pairs_poc.csv"
+FINAL_PATH = PROCESSED_DATA_DIR / "final_pairs_v05.csv"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "models" / "bge-m3-ft-zestama"
+DEFAULT_FINAL_OUTPUT_DIR = BASE_DIR / "models" / "bge-m3-ft-final-v05"
 MODEL_NAME = "BAAI/bge-m3"
 EVALUATOR_NAME = "validation"
 AP_METRIC = f"{EVALUATOR_NAME}_cosine_ap"
@@ -67,7 +70,82 @@ F1_METRIC = f"{EVALUATOR_NAME}_cosine_f1"
 # Inputs and safety checks
 # ============================================================
 
-def load_training_and_validation():
+def load_final_training_and_validation():
+    """
+    Read only the required columns and discard test rows immediately.
+    Stored client/program texts are not stripped or reconstructed.
+    """
+
+    required = ["pair_id", "split", "client_text", "program_text", "label"]
+
+    pairs = pd.read_csv(
+        FINAL_PATH,
+        encoding="utf-8-sig",
+        keep_default_na=False,
+        usecols=lambda column: column in required,
+    )
+
+    missing = sorted(set(required) - set(pairs.columns))
+
+    if missing:
+        raise ValueError(f"{FINAL_PATH.name}: missing columns {missing}")
+
+    pairs = pairs.loc[pairs["split"].isin(["training", "validation"])].copy()
+
+    pairs = pairs.rename(columns={"pair_id": "source_pair_id"})
+
+    training = pairs.loc[pairs["split"].eq("training")].copy().reset_index(drop=True)
+    validation = pairs.loc[pairs["split"].eq("validation")].copy().reset_index(drop=True)
+
+    for name, frame in [("Training", training), ("Validation", validation)]:
+
+        for column in ["source_pair_id", "client_text", "program_text"]:
+            assert frame[column].map(
+                lambda value: isinstance(value, str) and bool(value.strip())
+            ).all(), f"{name} contains empty or non-text {column}."
+
+        frame["label"] = pd.to_numeric(frame["label"], errors="raise")
+
+        assert frame["label"].isin([0, 1]).all(), f"{name} labels must be 0 or 1."
+        assert set(frame["label"]) == {0, 1}, f"{name} must contain both labels."
+
+        frame["label"] = frame["label"].astype(int)
+
+        assert frame["source_pair_id"].is_unique, f"{name} has duplicate pair IDs."
+        assert not frame.duplicated(["client_text", "program_text"]).any(), (
+            f"{name} has duplicate text pairs."
+        )
+
+    assert set(training["source_pair_id"].str.strip()).isdisjoint(
+        set(validation["source_pair_id"].str.strip())
+    ), "Training / validation source_pair_id overlap."
+
+    clients = validation["client_text"].tolist()
+    programs = validation["program_text"].tolist()
+
+    assert set(zip(training["client_text"], training["program_text"])).isdisjoint(
+        set(zip(clients, programs))
+    ), "Training / validation text-pair overlap."
+
+    training_clients = {
+        " ".join(text.casefold().split()) for text in training["client_text"]
+    }
+    validation_clients = {" ".join(text.casefold().split()) for text in clients}
+
+    assert training_clients.isdisjoint(validation_clients), (
+        "Training / validation normalized client_text overlap."
+    )
+
+    return training, validation, clients, programs
+
+
+def load_training_and_validation(dataset="zestama"):
+
+    if dataset == "final_v05":
+        return load_final_training_and_validation()
+
+    if dataset != "zestama":
+        raise ValueError(f"Unknown dataset: {dataset}")
 
     training = pd.read_csv(
         TRAINING_PATH,
@@ -175,7 +253,8 @@ def main() -> None:
     )
 
     parser.add_argument("--model-name-or-path", default=MODEL_NAME)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--dataset", choices=["zestama", "final_v05"], default="zestama")
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--allow-cpu", action="store_true", help="Allow a slow CPU smoke test; disables fp16.")
     parser.add_argument("--loss", choices=["OnlineContrastiveLoss", "MultipleNegativesRankingLoss"], default="OnlineContrastiveLoss")
@@ -193,7 +272,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    output_dir = args.output_dir.expanduser().resolve()
+    default_output_dir = (
+        DEFAULT_FINAL_OUTPUT_DIR if args.dataset == "final_v05" else DEFAULT_OUTPUT_DIR
+    )
+    output_dir = (args.output_dir or default_output_dir).expanduser().resolve()
+    training_path = FINAL_PATH if args.dataset == "final_v05" else TRAINING_PATH
+    validation_path = FINAL_PATH if args.dataset == "final_v05" else VALIDATION_PATH
+    model_id = "bge-m3-ft-final-v05" if args.dataset == "final_v05" else "bge-m3-ft-zestama"
 
     if output_dir.exists() and (not args.overwrite or not output_dir.is_dir()):
         raise FileExistsError(
@@ -253,7 +338,7 @@ def main() -> None:
     started = time.perf_counter()
     set_seed(args.seed)
 
-    training, validation, validation_clients, validation_programs = load_training_and_validation()
+    training, validation, validation_clients, validation_programs = load_training_and_validation(args.dataset)
 
     used_training = training.copy()
 
@@ -436,6 +521,7 @@ def main() -> None:
         for key, value in vars(args).items()
     }
     configuration.update({
+        "dataset": args.dataset,
         "output_dir": str(output_dir),
         "effective_fp16": effective_fp16,
         "bf16": False,
@@ -448,10 +534,10 @@ def main() -> None:
 
     summary = {
         "configuration": configuration,
-        "training_path": str(TRAINING_PATH),
-        "validation_path": str(VALIDATION_PATH),
-        "training_sha256": hashlib.sha256(TRAINING_PATH.read_bytes()).hexdigest(),
-        "validation_sha256": hashlib.sha256(VALIDATION_PATH.read_bytes()).hexdigest(),
+        "training_path": str(training_path),
+        "validation_path": str(validation_path),
+        "training_sha256": hashlib.sha256(training_path.read_bytes()).hexdigest(),
+        "validation_sha256": hashlib.sha256(validation_path.read_bytes()).hexdigest(),
         "training_pairs_loaded": len(training),
         "training_pairs_used": len(used_training),
         "training_labels_loaded": label_counts(training),
@@ -477,7 +563,7 @@ def main() -> None:
             for name in ["torch", "sentence-transformers", "transformers", "datasets", "accelerate", "pandas", "numpy"]
         },
         "notes": [
-            "No test data was read. Checkpoint selection uses validation cosine AP only.",
+            "Test rows are never used. Checkpoint selection uses validation cosine AP only.",
             "Evaluator F1 selects a threshold on validation; this is not fixed-threshold test performance.",
             "Initial and fine-tuned validation evaluations use the same max_seq_length.",
             "Use a new model path/id or clear that model's embedding cache after overwriting weights.",
@@ -489,7 +575,7 @@ def main() -> None:
         json.dump(summary, handle, ensure_ascii=False, indent=2, allow_nan=False)
 
     print("=" * 70)
-    print("BGE-M3 FINE-TUNING (ZESTAMA)")
+    print(f"BGE-M3 FINE-TUNING ({args.dataset.upper()})")
     print(f"Validation before: AP={before[AP_METRIC]:.4f}, F1={before[F1_METRIC]:.4f}")
     print(f"Validation best:   AP={after[AP_METRIC]:.4f}, F1={after[F1_METRIC]:.4f}")
     print("Best epoch:", best_epoch, "| step:", best_step)
@@ -498,7 +584,7 @@ def main() -> None:
     print("Summary:", output_dir / "training_summary.json")
     print("Add to MODELS in src/evaluate_embeddings_on_pairs.py:")
     print(json.dumps({
-        "id": "bge-m3-ft-zestama", "name": str(output_dir),
+        "id": model_id, "name": str(output_dir),
         "backend": "sentence_transformers",
     }, ensure_ascii=False)[:-1] + ', "query_prompt": None}')
     print("=" * 70)

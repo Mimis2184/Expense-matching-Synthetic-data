@@ -59,6 +59,8 @@ MODELS = [
 VALIDATION_PATH = OUTPUT_DATA_DIR / "review_100_pairs_comparison.xlsx"
 TEST_PATH = OUTPUT_DATA_DIR / "review_300_pairs_comparison.xlsx"
 OUTPUT_PATH = OUTPUT_DATA_DIR / "embeddings_on_pairs_results.xlsx"
+FINAL_PATH = PROCESSED_DATA_DIR / "final_pairs_v05.csv"
+FINAL_OUTPUT_PATH = OUTPUT_DATA_DIR / "embeddings_on_pairs_results_final_v05.xlsx"
 
 # Fine-tuning data: no validation or test pair may appear in it.
 TRAINING_PATH = PROCESSED_DATA_DIR / "training_pairs_poc.csv"
@@ -171,6 +173,76 @@ def load_inputs():
     else:
         print(f"Note: {TRAINING_PATH.name} not found; training overlap not checked.")
     return validation, test, excluded
+
+
+def load_final_inputs():
+    """
+    Use stored validation/test texts without rebuilding them.
+    Training rows are used only to check client leakage.
+    """
+
+    required = [
+        "pair_id", "split", "source", "pair_category",
+        "client_text", "program_text", "label", "label_text",
+    ]
+    pairs = pd.read_csv(
+        FINAL_PATH,
+        encoding="utf-8-sig",
+        keep_default_na=False,
+        usecols=lambda column: column in required,
+    )
+    require_columns(pairs, required, FINAL_PATH)
+
+    assert pairs["pair_id"].map(
+        lambda value: isinstance(value, str) and bool(value.strip())
+    ).all(), "Final dataset contains empty or non-text pair_id values."
+    assert pairs["pair_id"].is_unique, "Final dataset contains duplicate pair_id values."
+    assert pairs["split"].isin(["training", "validation", "test"]).all(), (
+        "Final dataset contains unknown split values."
+    )
+
+    # Do not convert training labels or include training in any metrics.
+    training_clients = pairs.loc[pairs["split"].eq("training"), "client_text"]
+    validation = pairs.loc[pairs["split"].eq("validation")].copy().reset_index(drop=True)
+    test = pairs.loc[pairs["split"].eq("test")].copy().reset_index(drop=True)
+
+    assert len(test) == 264, "Final test must contain exactly 264 pairs."
+
+    for name, frame in [("validation", validation), ("test", test)]:
+        if frame.empty:
+            raise ValueError(f"Final {name} split is empty.")
+        for column in ["client_text", "program_text"]:
+            assert frame[column].map(
+                lambda value: isinstance(value, str) and bool(value.strip())
+            ).all(), f"Final {name} contains empty or non-text {column}."
+
+        labels = pd.to_numeric(frame["label"], errors="raise")
+        assert labels.isin([0, 1]).all(), f"Final {name} labels must be 0 or 1."
+        frame["label"] = labels.astype(int)
+        assert frame["label_text"].isin(LABELS).all(), f"Final {name} has invalid label_text."
+        assert frame["label_text"].map(LABELS).eq(frame["label"]).all(), (
+            f"Final {name}: label and label_text disagree."
+        )
+        assert frame["pair_category"].isin(CATEGORIES).all(), (
+            f"Final {name} contains unknown pair_category values."
+        )
+
+    assert set(validation["label"]) == {0, 1}, (
+        "Final validation must contain both Match and No match labels."
+    )
+
+    def client_keys(texts):
+        return {" ".join(clean_value(text).casefold().split()) for text in texts}
+
+    test_keys = client_keys(test["client_text"])
+    validation_keys = client_keys(validation["client_text"])
+    training_keys = client_keys(training_clients)
+    assert test_keys.isdisjoint(validation_keys), "Final test / validation client_text overlap."
+    assert test_keys.isdisjoint(training_keys), "Final test / training client_text overlap."
+    assert validation_keys.isdisjoint(training_keys), "Final validation / training client_text overlap."
+
+    print(f"{FINAL_PATH.name}: validation {len(validation)}, test {len(test)}; test excluded 0.")
+    return validation, test, 0
 
 
 def build_texts(df):
@@ -407,6 +479,10 @@ def main() -> None:
         description="Evaluate embedding pair classification with a validation-only threshold."
     )
     parser.add_argument(
+        "--dataset", choices=["zestama", "final_v05"], default="zestama",
+        help="Dataset to evaluate (default: zestama).",
+    )
+    parser.add_argument(
         "--models", nargs="+", choices=[model["id"] for model in MODELS],
         default=None, help="Model IDs to evaluate (default: all configured models).",
     )
@@ -415,21 +491,31 @@ def main() -> None:
         help="Allow replacing the results Excel; input files are never changed.",
     )
     args = parser.parse_args()
-    if OUTPUT_PATH.exists() and not args.overwrite:
-        raise FileExistsError(f"{OUTPUT_PATH} already exists. Use --overwrite to replace it.")
+    output_path = FINAL_OUTPUT_PATH if args.dataset == "final_v05" else OUTPUT_PATH
+    if output_path.exists() and not args.overwrite:
+        raise FileExistsError(f"{output_path} already exists. Use --overwrite to replace it.")
     if not MODELS or len({model["id"] for model in MODELS}) != len(MODELS):
         raise ValueError("MODELS must contain at least one model, with unique IDs.")
     selected = [model for model in MODELS if args.models is None or model["id"] in args.models]
 
-    validation, test, test_excluded = load_inputs()
+    if args.dataset == "final_v05":
+        validation, test, test_excluded = load_final_inputs()
+        test_columns = ["pair_id", "source", "pair_category", "label", "label_text"]
+    else:
+        validation, test, test_excluded = load_inputs()
+        test_columns = [
+            "review_id", "source_pair_id", "pair_category", "label", "label_text", "label_source",
+        ]
     # Label changes do not alter cached text embeddings.
     all_pairs = pd.concat([validation, test], ignore_index=True)
-    clients, programs = build_texts(all_pairs)
+    if args.dataset == "final_v05":
+        clients = all_pairs["client_text"].tolist()
+        programs = all_pairs["program_text"].tolist()
+    else:
+        clients, programs = build_texts(all_pairs)
     validation_labels = validation["label"].to_numpy(dtype=int)
     test_labels = test["label"].to_numpy(dtype=int)
-    test_pairs = test[[
-        "review_id", "source_pair_id", "pair_category", "label", "label_text", "label_source",
-    ]].copy()
+    test_pairs = test[test_columns].copy()
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     summary_rows = []
     category_rows = []
@@ -476,13 +562,13 @@ def main() -> None:
         pd.DataFrame(category_rows).to_excel(writer, sheet_name="per_category", index=False)
         pd.concat(curves, ignore_index=True).to_excel(writer, sheet_name="threshold_curve", index=False)
         test_pairs.to_excel(writer, sheet_name="test_pairs", index=False)
-    with OUTPUT_PATH.open("wb" if args.overwrite else "xb") as handle:
+    with output_path.open("wb" if args.overwrite else "xb") as handle:
         handle.write(buffer.getvalue())
     print("=" * 70)
     print("EMBEDDINGS ON PAIRS (metrics: 0–1; prediction 1 = Match)")
     print(pd.DataFrame(summary_rows).round(4).to_string(index=False))
     print("Undefined ROC-AUC values are blank in Excel; zero-denominator precision/recall/F1 = 0.")
-    print("Saved:", OUTPUT_PATH)
+    print("Saved:", output_path)
 
 
 if __name__ == "__main__":

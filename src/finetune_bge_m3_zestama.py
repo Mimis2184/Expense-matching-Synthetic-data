@@ -366,6 +366,8 @@ def main() -> None:
         transformer = model[0].auto_model
         if hasattr(transformer.config, "use_cache"):
             transformer.config.use_cache = False
+        # Enabled on the model here: transformers 5.17 Trainer passes every_n_layers, which sentence-transformers 6.1.0 does not accept.
+        model.gradient_checkpointing_enable({"use_reentrant": False})
 
     token_counts = {
         "training_loaded": token_length_report(
@@ -447,8 +449,7 @@ def main() -> None:
         bf16=False,
         tf32=False,
         use_cpu=not gpu_available,
-        gradient_checkpointing=args.gradient_checkpointing,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=False,
         optim="adamw_torch",
         eval_strategy="epoch",
         save_strategy="epoch",

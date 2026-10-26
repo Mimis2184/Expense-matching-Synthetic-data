@@ -1,8 +1,9 @@
 # Smoke test: check GPU, library compatibility and output download before fine-tuning.
 $schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
-display_name: t4-smoke-test
+display_name: t4-serverless-smoke-test
 experiment_name: smoke-test-t4
-compute: azureml:gt-aicoe-gpu-nc4as-t4
+resources:
+  instance_type: Standard_NC4as_T4_v3
 environment: azureml://registries/azureml/environments/acpt-pytorch-2.8-cuda12.6/versions/19
 command: >-
   nvidia-smi

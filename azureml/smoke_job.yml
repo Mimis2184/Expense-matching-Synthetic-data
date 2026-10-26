@@ -1,0 +1,13 @@
+# Smoke test: check GPU, library compatibility and output download before fine-tuning.
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+display_name: t4-smoke-test
+experiment_name: smoke-test-t4
+compute: azureml:gt-aicoe-gpu-nc4as-t4
+environment: azureml://registries/azureml/environments/acpt-pytorch-2.8-cuda12.6/versions/19
+command: >-
+  nvidia-smi
+  && python -c "import torch; print('torch:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
+  && python -c "import torch; from pathlib import Path; Path('constraints.txt').write_text('torch==' + torch.__version__ + '\n', encoding='utf-8')"
+  && pip install -c constraints.txt "sentence-transformers==6.1.0" "transformers==5.17.0" "datasets>=3.0,<5" "accelerate>=1.0,<2"
+  && python -c "import torch, sentence_transformers, transformers; print('torch:', torch.__version__); print('sentence-transformers:', sentence_transformers.__version__); print('transformers:', transformers.__version__); print('CUDA available:', torch.cuda.is_available())"
+  && mkdir -p outputs && echo ok > outputs/smoke.txt

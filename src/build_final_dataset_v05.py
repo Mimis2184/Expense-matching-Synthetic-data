@@ -42,6 +42,8 @@ from src.evaluate_embeddings_on_pairs import (
 # review300_claude -> training (excluding PLAUSIBLE negatives).
 # New pairs are grouped by anchor text or non-lexical source row.
 # Shared clients connect groups and must stay in the same split.
+# Default stratified mode excludes flag_review=True pairs before
+# deduplication, then redistributes all components across 5 folds.
 #
 # Remove new clients overlapping test. Conflicting constraints
 # in fixed old samples, or conflicting labels affecting the fixed
@@ -262,15 +264,31 @@ def rename_old_fields(df):
     return df, int(changed.sum())
 
 
-def load_old_pairs():
+def load_old_pairs(split_mode="fixed"):
 
     test_ids, claude_labels, left_out = load_test_split()
     test, _, _ = load_pairs(TEST_COMPARISON_PATH, validation=False)
-    validation, _, _ = load_pairs(VALIDATION_PATH, validation=True)
+    if split_mode == "fixed":
+        validation, _, _ = load_pairs(VALIDATION_PATH, validation=True)
+    else:
+        # Preserve the old reference-label rule without imposing a
+        # fixed 100-pair split in the new stratified build.
+        validation = pd.read_excel(VALIDATION_PATH, sheet_name="review_comparison")
+        require_columns(validation, TEXT_COLUMNS + [
+            "review_id", "source_pair_id", "pair_category", "manual_review_label", "our_label",
+        ], VALIDATION_PATH)
+        manual = validation["manual_review_label"].map(clean_value)
+        original = validation["our_label"].map(clean_value)
+        assert (manual.eq("") | manual.isin(["Match", "No match"])).all()
+        assert original.isin(["Match", "No match"]).all()
+        validation["label"] = manual.where(manual.ne(""), original).map({"Match": 1, "No match": 0})
+        assert validation["review_id"].is_unique
+        assert validation["source_pair_id"].is_unique
     comparison = pd.read_excel(TEST_COMPARISON_PATH, sheet_name="review_comparison")
     comparison["source_pair_id"] = comparison["source_pair_id"].map(clean_value)
     assert set(test["source_pair_id"]) == test_ids
-    assert len(test) == 264, f"Expected the fixed 264-pair test; loader now returns {len(test)}."
+    if split_mode == "fixed":
+        assert len(test) == 264, f"Expected the fixed 264-pair test; loader now returns {len(test)}."
 
     claude = comparison.loc[comparison["source_pair_id"].isin(claude_labels)].copy()
     assert len(claude) == len(claude_labels)
@@ -290,7 +308,12 @@ def load_old_pairs():
         frame["confidence"] = ""
         frame["rule"] = ""
         frame["flag_review"] = False
-        frame = prepare_frame(frame, source, "review_id", fixed_split=split)
+        frame = prepare_frame(
+            frame, source, "review_id",
+            fixed_split=split if split_mode == "fixed" else "",
+        )
+        # Source provenance is independent of its new split assignment.
+        frame["_is_new"] = False
         frame["group_key"] = "old:" + frame["_client_key"]
         frames.append(frame)
 
@@ -374,12 +397,45 @@ def remove_overlaps_and_duplicates(df):
 # Connected groups and split assignment
 # ============================================================
 
-def assign_splits(df, val_fraction, seed):
+def remove_stratified_duplicates(df):
     """
-    Preserve original group_key values. Connect groups sharing a client
-    so they cannot leak across splits. Fixed old splits constrain these
-    components. Randomly select exactly ceil(fraction * new groups),
-    where possible; otherwise stop with the incompatible constraints.
+    Same duplicate rules as fixed mode, without protected samples
+    or client-overlap removals. Conflicting labels drop all copies.
+    """
+
+    df = df.copy()
+    low_confidence = df["flag_review"]
+    report_rows(df.loc[low_confidence], "Removed flag_review=True pairs before deduplication:")
+    low_confidence_count = int(low_confidence.sum())
+    df = df.loc[~low_confidence].copy()
+    assert not df["flag_review"].any()
+
+    conflicts = df.groupby(
+        ["client_text", "program_text"], sort=False,
+    )["label"].transform("nunique").gt(1)
+    report_rows(df.loc[conflicts], "Conflicting duplicate labels (all occurrences excluded):")
+    counts = {
+        "test_client_leakage": 0,
+        "validation_client_leakage": 0,
+        "low_confidence_excluded": low_confidence_count,
+        "conflicting_duplicate_rows": int(conflicts.sum()),
+    }
+    df = df.loc[~conflicts].copy()
+
+    # Keep the same source preference as the existing fixed build.
+    priority = {"review300_test": 0, "review100": 1, "review300_claude": 2}
+    df["_priority"] = df["source"].map(priority).fillna(3)
+    df = df.sort_values("_priority", kind="stable")
+    duplicates = df.duplicated(["client_text", "program_text"], keep="first")
+    report_rows(df.loc[duplicates], "Removed same-label duplicate pairs:")
+    counts["same_label_duplicate_rows"] = int(duplicates.sum())
+    return df.loc[~duplicates].copy().reset_index(drop=True), counts
+
+
+def build_components(df):
+    """
+    Connect the original groups through shared normalized clients.
+    Both split modes use this exact union-find implementation.
     """
 
     df = df.copy()
@@ -405,6 +461,16 @@ def assign_splits(df, val_fraction, seed):
             first_group_by_client[client_key] = group
 
     df["_component"] = df["group_key"].map(find)
+    return df
+
+
+def assign_splits(df, val_fraction, seed):
+    """
+    Preserve the original fixed split behavior. Connect groups sharing
+    clients, honor old assignments, and sample new validation groups.
+    """
+
+    df = build_components(df)
     fixed_components = {}
     for component, rows in df.groupby("_component", sort=False):
         fixed = set(rows.loc[rows["_fixed_split"].ne(""), "_fixed_split"])
@@ -458,6 +524,46 @@ def assign_splits(df, val_fraction, seed):
     return df
 
 
+def assign_stratified_splits(df, seed, n_folds):
+    """
+    Fold 0 -> test, fold 1 -> validation, remaining folds -> training.
+    Stratify on category + label while keeping components intact.
+    All components enter the folds; flagged pairs were removed earlier.
+    """
+
+    from sklearn.model_selection import StratifiedGroupKFold
+
+    df = build_components(df)
+    assert df["_fixed_split"].eq("").all()
+    assert not df["flag_review"].any(), "Flagged pairs must be excluded before splitting."
+    eligible = df
+
+    if eligible["_component"].nunique() < n_folds:
+        raise ValueError(
+            f"Stratified splitting needs at least {n_folds} components; no files written."
+        )
+
+    strata = eligible["pair_category"] + "_" + eligible["label"].astype(str)
+    splitter = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    df["split"] = "training"
+    assigned = set()
+
+    for fold, (_, fold_positions) in enumerate(splitter.split(
+        X=eligible[["label"]],
+        y=strata,
+        groups=eligible["_component"],
+    )):
+        indices = eligible.iloc[fold_positions].index
+        assert assigned.isdisjoint(indices), "A row appears in multiple folds."
+        assigned.update(indices)
+        split = "test" if fold == 0 else "validation" if fold == 1 else "training"
+        df.loc[indices, "split"] = split
+
+    assert assigned == set(eligible.index), "Some eligible rows were not assigned to a fold."
+    print(f"Components distributed across {n_folds} folds:", eligible["_component"].nunique())
+    return df
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -465,6 +571,8 @@ def assign_splits(df, val_fraction, seed):
 def main() -> None:
 
     parser = argparse.ArgumentParser(description="Build the reviewed v0.5 dataset with group splits and no client leakage.")
+    parser.add_argument("--split-mode", choices=["fixed", "stratified"], default="stratified")
+    parser.add_argument("--n-folds", type=int, default=5, help="Stratified folds (at least 3); unused in fixed mode.")
     parser.add_argument("--val-fraction", type=float, default=0.10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true")
@@ -473,19 +581,28 @@ def main() -> None:
 
     if not 0 <= args.val_fraction < 1:
         parser.error("--val-fraction must be in [0, 1).")
+    if args.n_folds < 3:
+        parser.error("--n-folds must be at least 3.")
     for path in [CSV_OUTPUT_PATH, EXCEL_OUTPUT_PATH]:
         if path.exists() and not args.overwrite and not args.dry_run:
             raise FileExistsError(f"{path} already exists. Use --overwrite to replace it.")
 
     new_pairs = load_new_pairs()
-    old_pairs = load_old_pairs()
+    old_pairs = load_old_pairs(args.split_mode)
     pairs = pd.concat([old_pairs, new_pairs], ignore_index=True)
+    if args.split_mode == "stratified":
+        pairs["_fixed_split"] = ""
     loaded = len(pairs)
     print("Loaded pairs per source:")
     print(pairs["source"].value_counts().to_string())
 
-    pairs, removed = remove_overlaps_and_duplicates(pairs)
-    pairs = assign_splits(pairs, args.val_fraction, args.seed)
+    if args.split_mode == "fixed":
+        pairs, removed = remove_overlaps_and_duplicates(pairs)
+        pairs = assign_splits(pairs, args.val_fraction, args.seed)
+    else:
+        print(f"Stratified mode: --val-fraction is unused; validation/test each receive one of {args.n_folds} folds.")
+        pairs, removed = remove_stratified_duplicates(pairs)
+        pairs = assign_stratified_splits(pairs, args.seed, args.n_folds)
 
     # --------------------------------------------------------
     # Safety assertions
@@ -493,12 +610,20 @@ def main() -> None:
 
     assert pairs["label"].isin([0, 1]).all()
     assert pairs.groupby("group_key")["split"].nunique().eq(1).all()
+    assert pairs.groupby("_component")["split"].nunique().eq(1).all(), "Component leakage across splits."
     assert pairs.groupby("_client_key")["split"].nunique().eq(1).all(), "Client leakage across splits."
     assert not pairs.duplicated(["client_text", "program_text"]).any()
-    assert len(pairs.loc[pairs["split"].eq("test")]) == 264
-    assert pairs.loc[pairs["split"].eq("test"), "source"].eq("review300_test").all()
-    assert pairs.loc[pairs["source"].eq("review100"), "split"].eq("validation").all()
-    assert pairs.loc[pairs["source"].eq("review300_claude"), "split"].eq("training").all()
+    if args.split_mode == "fixed":
+        assert len(pairs.loc[pairs["split"].eq("test")]) == 264
+        assert pairs.loc[pairs["split"].eq("test"), "source"].eq("review300_test").all()
+        assert pairs.loc[pairs["source"].eq("review100"), "split"].eq("validation").all()
+        assert pairs.loc[pairs["source"].eq("review300_claude"), "split"].eq("training").all()
+    else:
+        for split in ["training", "validation", "test"]:
+            split_pairs = pairs.loc[pairs["split"].eq(split)]
+            assert set(split_pairs["label"]) == {0, 1}, f"{split} must contain both labels."
+            assert set(split_pairs["pair_category"]) == CATEGORIES, f"{split} must contain all four categories."
+        assert not pairs["flag_review"].any(), "No flag_review=True pair may remain."
     assert loaded - len(pairs) == sum(removed.values())
 
     pairs["_split_order"] = pairs["split"].map({"training": 0, "validation": 1, "test": 2})
@@ -513,11 +638,21 @@ def main() -> None:
 
     print("=" * 70)
     print("FINAL POC DATASET V0.5")
+    print("Split mode:", args.split_mode)
     print("=" * 70)
     print("Pairs per split:")
     print(output["split"].value_counts().to_string())
+    print("\nPercentage of all pairs per split:")
+    print((output["split"].value_counts(normalize=True) * 100).round(2).to_string())
+    print("\nSplit x source:")
+    print(pd.crosstab(output["split"], output["source"]).to_string())
     print("\nSplit x pair_category x label:")
     print(output.groupby(["split", "pair_category", "label"]).size().to_string())
+    print("\nPair category x label percentages within each split (rows sum to 100%):")
+    proportions = pd.crosstab(
+        output["split"], [output["pair_category"], output["label"]], normalize="index",
+    ) * 100
+    print(proportions.round(2).to_string())
     print("\nGroups per split:")
     print(output.groupby("split")["group_key"].nunique().to_string())
     print("\nRemoved pairs:")
@@ -526,6 +661,21 @@ def main() -> None:
     print("Total removed:", loaded - len(output))
     print("\nflag_review=True per split:")
     print(output.groupby("split")["flag_review"].sum().to_string())
+
+    if args.split_mode == "stratified":
+        difficult_masks = {
+            "semi_hard_no_match": output["pair_category"].eq("semi_hard_negative") & output["label"].eq(0),
+            "multi_match": output["pair_category"].isin(["easy_negative", "semi_hard_negative"]) & output["label"].eq(1),
+            "non_lexical_match": output["pair_category"].eq("non_lexical_positive") & output["label"].eq(1),
+            "non_lexical_no_match": output["pair_category"].eq("non_lexical_positive") & output["label"].eq(0),
+            "positive_no_match": output["pair_category"].eq("positive") & output["label"].eq(0),
+        }
+        difficult_groups = pd.DataFrame({
+            name: output.loc[mask].groupby("split")["group_key"].nunique()
+            for name, mask in difficult_masks.items()
+        }).reindex(["training", "validation", "test"]).fillna(0).astype(int)
+        print("\nDifficult groups per split (distinct group_key; subsets may overlap):")
+        print(difficult_groups.to_string())
 
     if args.dry_run:
         print("Dry run complete: no output files written.")

@@ -206,8 +206,6 @@ def load_final_inputs():
     validation = pairs.loc[pairs["split"].eq("validation")].copy().reset_index(drop=True)
     test = pairs.loc[pairs["split"].eq("test")].copy().reset_index(drop=True)
 
-    assert len(test) == 264, "Final test must contain exactly 264 pairs."
-
     for name, frame in [("validation", validation), ("test", test)]:
         if frame.empty:
             raise ValueError(f"Final {name} split is empty.")
@@ -519,6 +517,7 @@ def main() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     summary_rows = []
     category_rows = []
+    source_rows = []
     curves = []
 
     for model in selected:
@@ -545,6 +544,13 @@ def main() -> None:
                 "model": model["id"], "pair_category": category, "threshold": threshold,
                 **evaluation_metrics(test_labels[mask], test_similarities[mask], threshold),
             })
+        if args.dataset == "final_v05":
+            for source in sorted(test["source"].unique()):
+                mask = test["source"].eq(source).to_numpy()
+                source_rows.append({
+                    "model": model["id"], "source": source, "threshold": threshold,
+                    **evaluation_metrics(test_labels[mask], test_similarities[mask], threshold),
+                })
         test_pairs[f"{model['id']}_similarity"] = test_similarities
         test_pairs[f"{model['id']}_prediction"] = (test_similarities >= threshold).astype(int)
         print(
@@ -560,6 +566,8 @@ def main() -> None:
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         pd.DataFrame(summary_rows).to_excel(writer, sheet_name="summary", index=False)
         pd.DataFrame(category_rows).to_excel(writer, sheet_name="per_category", index=False)
+        if args.dataset == "final_v05":
+            pd.DataFrame(source_rows).to_excel(writer, sheet_name="per_source", index=False)
         pd.concat(curves, ignore_index=True).to_excel(writer, sheet_name="threshold_curve", index=False)
         test_pairs.to_excel(writer, sheet_name="test_pairs", index=False)
     with output_path.open("wb" if args.overwrite else "xb") as handle:

@@ -1,0 +1,20 @@
+# Fine-tune bge-m3 on final_pairs_v05 training split (serverless T4).
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+display_name: bge-m3-finetune-final-v05
+experiment_name: bge-m3-finetune
+code: ..
+resources:
+  instance_type: Standard_NC4as_T4_v3
+limits:
+  timeout: 7200
+environment: azureml://registries/azureml/environments/acpt-pytorch-2.8-cuda12.6/versions/19
+inputs:
+  pairs:
+    type: uri_file
+    path: ../data/processed/final_pairs_v05.csv
+command: >-
+  python -c "import torch; from pathlib import Path; Path('constraints.txt').write_text('torch==' + torch.__version__ + '\n', encoding='utf-8')"
+  && pip install -c constraints.txt "sentence-transformers==6.1.0" "transformers==5.17.0" "datasets>=3.0,<5" "accelerate>=1.0,<2"
+  && mkdir -p data/processed && cp "${{inputs.pairs}}" data/processed/final_pairs_v05.csv
+  && python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-m3')"
+  && python src/finetune_bge_m3_zestama.py --dataset final_v05 --output-dir outputs/bge-m3-ft-final-v05

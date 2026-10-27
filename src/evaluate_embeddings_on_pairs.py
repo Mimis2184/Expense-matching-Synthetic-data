@@ -54,6 +54,13 @@ MODELS = [
         "name": "text-embedding-3-large",
         "backend": "azure",
     },
+    # Fine-tuned on final_pairs_v05 training split (Azure ML job quiet_octopus_64swzwffzy, commit 873b354).
+    {
+        "id": "bge-m3-ft-final-v05",
+        "name": str(BASE_DIR / "models" / "bge-m3-ft-final-v05"),
+        "backend": "sentence_transformers",
+        "query_prompt": None,
+    },
 ]
 
 VALIDATION_PATH = OUTPUT_DATA_DIR / "review_100_pairs_comparison.xlsx"

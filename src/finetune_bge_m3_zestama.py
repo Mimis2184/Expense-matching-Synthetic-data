@@ -429,10 +429,10 @@ def main() -> None:
         batch_sampler = BatchSamplers.NO_DUPLICATES
         loss_settings = {"positive_pairs_only": True, "batch_sampler": "no_duplicates"}
 
-    # A fresh checkpoint subdirectory prevents --overwrite from resuming or
-    # selecting stale checkpoints. Only the final model is saved at the root.
+    # A fresh local temp directory keeps intermediate checkpoints off the
+    # (possibly remote) output directory. Only the final model is saved at the root.
     output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir = Path(tempfile.mkdtemp(prefix="checkpoints_", dir=output_dir))
+    checkpoint_dir = Path(tempfile.mkdtemp(prefix="checkpoints_"))
 
     training_args = SentenceTransformerTrainingArguments(
         output_dir=str(checkpoint_dir),

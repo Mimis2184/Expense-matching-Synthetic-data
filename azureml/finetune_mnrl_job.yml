@@ -1,0 +1,40 @@
+# Full fine-tuning: MNRL with reviewed same-subprogram triplets, 3 epochs, checkpoint selection by real_validation Recall@1 (serverless T4). GPU usage every 30 s, Python stack dumps every 5 min.
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+display_name: bge-m3-finetune-mnrl-subprogram
+experiment_name: bge-m3-finetune
+code: ..
+resources:
+  instance_type: Standard_NC4as_T4_v3
+limits:
+  timeout: 4200
+environment: azureml://registries/azureml/environments/acpt-pytorch-2.8-cuda12.6/versions/19
+inputs:
+  pairs:
+    type: uri_file
+    path: ../data/processed/final_pairs_v05.csv
+  triplets:
+    type: uri_file
+    path: ../data/processed/mnrl_triplets_training.csv
+  real_pairs:
+    type: uri_file
+    path: ../data/processed/real_pairs_split.csv
+  program_expenses:
+    type: uri_file
+    path: ../data/processed/program_expenses_clean.csv
+command: >-
+  set -e;
+  python -c "import torch; from pathlib import Path; Path('constraints.txt').write_text('torch==' + torch.__version__ + '\n', encoding='utf-8')";
+  pip install -c constraints.txt "sentence-transformers==6.1.0" "transformers==5.17.0" "datasets>=3.0,<5" "accelerate>=1.0,<2";
+  mkdir -p data/processed outputs;
+  cp "${{inputs.pairs}}" data/processed/final_pairs_v05.csv;
+  cp "${{inputs.triplets}}" data/processed/mnrl_triplets_training.csv;
+  cp "${{inputs.real_pairs}}" data/processed/real_pairs_split.csv;
+  cp "${{inputs.program_expenses}}" data/processed/program_expenses_clean.csv;
+  python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-m3')";
+  set +e;
+  nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,memory.total --format=csv -l 30 > outputs/gpu_usage.csv &
+  MON=$!;
+  timeout -k 60s -s ABRT 2400s python -X faulthandler -u -c "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(300, repeat=True); sys.argv = ['src/finetune_bge_m3_zestama.py', '--dataset', 'mnrl_triplets', '--output-dir', 'outputs/bge-m3-ft-mnrl-subprogram']; runpy.run_path('src/finetune_bge_m3_zestama.py', run_name='__main__')";
+  RC=$?;
+  kill $MON;
+  exit $RC

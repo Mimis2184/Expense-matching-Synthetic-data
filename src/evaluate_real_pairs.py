@@ -15,7 +15,7 @@ import pandas as pd
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from config import OUTPUT_DATA_DIR
+from config import OUTPUT_DATA_DIR, PROCESSED_DATA_DIR
 from src.build_evaluation_set import (
     FEW_SHOT_SOURCE_PATH,
     HUMAN_PAIRS_DIR,
@@ -49,6 +49,7 @@ from src.evaluate_embeddings_on_pairs import (
 # ============================================================
 
 OUTPUT_PATH = OUTPUT_DATA_DIR / "real_pairs_evaluation.xlsx"
+SPLIT_PATH = PROCESSED_DATA_DIR / "real_pairs_split.csv"
 HUMAN_COLUMNS = [
     "Program_name", "Subprogram_ID", "Category", "Subcategory",
     "Business_Expense", "Business_Expense_description",
@@ -180,6 +181,26 @@ def load_inputs():
     )
 
 
+def filter_split(pairs, split):
+    assignments = pd.read_csv(SPLIT_PATH, encoding="utf-8-sig", keep_default_na=False)
+    keys = ["source_excel", "excel_row"]
+    require_columns(assignments, keys + ["split"], SPLIT_PATH)
+    assert not assignments.duplicated(keys).any(), "Duplicate pair identities in split file."
+    matched = pairs.merge(
+        assignments[keys + ["split"]], on=keys, how="left",
+        validate="one_to_one", indicator=True,
+    )
+    assert matched["_merge"].eq("both").all(), (
+        "Every real pair must match exactly one row in the split file."
+    )
+    selected = matched.loc[matched["split"].eq(split)].drop(columns=["split", "_merge"])
+    expected = {"real_validation": 269, "real_test": 268}
+    assert len(selected) == expected[split], (
+        f"{split}: expected {expected[split]} pairs, found {len(selected)}."
+    )
+    return selected.reset_index(drop=True)
+
+
 def load_thresholds():
     summary = pd.read_excel(FINAL_OUTPUT_PATH, sheet_name="summary")
     require_columns(summary, ["model", "threshold"], FINAL_OUTPUT_PATH)
@@ -308,13 +329,24 @@ def evaluate_model(model, threshold, pairs, candidates, correct_ids,
 def main():
     parser = argparse.ArgumentParser(description="Evaluate embeddings on held-out real human pairs.")
     parser.add_argument("--overwrite", action="store_true", help="Replace the existing output workbook.")
+    parser.add_argument(
+        "--split", choices=["all", "real_validation", "real_test"], default="all",
+        help="Which real pair split to evaluate.",
+    )
     args = parser.parse_args()
-    if OUTPUT_PATH.exists() and not args.overwrite:
-        raise FileExistsError(f"Output exists: {OUTPUT_PATH}. Use --overwrite to replace it.")
+    output_path = (
+        OUTPUT_PATH if args.split == "all"
+        else OUTPUT_DATA_DIR / f"real_pairs_evaluation_{args.split}.xlsx"
+    )
+    if output_path.exists() and not args.overwrite:
+        raise FileExistsError(f"Output exists: {output_path}. Use --overwrite to replace it.")
     if not MODELS or len({model["id"] for model in MODELS}) != len(MODELS):
         raise ValueError("MODELS must contain non-empty, distinct model entries.")
 
     pairs, programs, contexts, excluded = load_inputs()
+    if args.split != "all":
+        pairs = filter_split(pairs, args.split)
+    print(f"Split: {args.split}; pairs: {len(pairs)}")
     thresholds = load_thresholds()
     candidates, correct_ids, catalog_texts, clients, program_texts = prepare_candidates(
         pairs, programs, contexts,
@@ -346,15 +378,15 @@ def main():
         summary.to_excel(writer, sheet_name="summary", index=False)
         output_pairs.to_excel(writer, sheet_name="pairs", index=False)
         excluded.to_excel(writer, sheet_name="excluded", index=False)
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_PATH.open("wb" if args.overwrite else "xb") as handle:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb" if args.overwrite else "xb") as handle:
         handle.write(buffer.getvalue())
     print("=" * 70)
     print("REAL PAIRS EVALUATION (rates and retrieval metrics: 0–1)")
     print(summary.round(4).to_string(index=False))
     print("All evaluated pairs are known matches; above-threshold rate is positive recall.")
     print("Random reference uses the requested single-target uniform-ranking formula.")
-    print("Saved:", OUTPUT_PATH)
+    print("Saved:", output_path)
 
 
 if __name__ == "__main__":

@@ -134,8 +134,9 @@ confusions happen; and some program expenses only ever appeared as matches.
 ## Final results
 
 **Real test** (268 unseen real pairs, ranking within the subprogram): see
-*Results in short* above. The MNRL model is better than both pretrained models
-in every program, and its remaining errors are spread across many expenses
+*Results in short* above. The MNRL model is better than or equal to both
+pretrained models in every program (it ties with `text-embedding-3-large` on
+one of the six), and its remaining errors are spread across many expenses
 instead of a few generic ones.
 
 **Synthetic test** (303 pairs, match or not, threshold chosen on validation):

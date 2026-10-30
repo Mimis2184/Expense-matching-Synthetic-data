@@ -61,6 +61,13 @@ MODELS = [
         "backend": "sentence_transformers",
         "query_prompt": None,
     },
+    # Fine-tuned with MultipleNegativesRankingLoss on reviewed same-subprogram triplets (Azure ML job helpful_whistle_4knnfhpzxn, commit 2726b7d; best epoch 1 by real_validation Recall@1).
+    {
+        "id": "bge-m3-ft-mnrl-subprogram",
+        "name": str(BASE_DIR / "models" / "bge-m3-ft-mnrl-subprogram"),
+        "backend": "sentence_transformers",
+        "query_prompt": None,
+    },
 ]
 
 VALIDATION_PATH = OUTPUT_DATA_DIR / "review_100_pairs_comparison.xlsx"
